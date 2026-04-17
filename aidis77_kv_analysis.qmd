@@ -1,0 +1,481 @@
+# AIDIS Round 77: Household Wealth Classification Across Indian States under a Heterogenous Agent framework
+
+---
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: show
+    code-tools: true
+    code-overflow: wrap
+    fig-width: 16
+    fig-height: 6
+    fig-align: center
+    theme: cosmo
+    embed-resources: true
+  pdf:
+    toc: true
+    fig-width: 16
+    fig-height: 6
+    fig-align: center
+    geometry:
+      - margin=1in
+execute:
+  warning: false
+  message: false
+  echo: true
+editor: visual
+---
+
+# Setup
+
+## Packages
+
+```{r}
+#| label: packages
+#| include: true
+
+#install.packages(c("haven","dplyr","tidyr","purrr","ggplot2", "sf","rnaturalearth","rmapshaper","patchwork"))
+
+library(haven)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(sf)
+library(rnaturalearth)
+library(rmapshaper)
+library(patchwork)
+```
+
+## Data path
+
+```{r}
+#| label: path
+
+data_dir <- "C:/Users/HP/Downloads/Round77sch18pt2Data"
+```
+
+## Helper functions
+
+```{r}
+#| label: helpers
+
+make_key <- function(df) {
+  names(df) <- tolower(names(df))
+  df |> mutate(hh_key = as.character(hhid))
+}
+
+safe_sum <- function(path, var) {
+  if (!file.exists(path)) return(tibble(hh_key = character()))
+  read_dta(path) |>
+    make_key() |>
+    group_by(hh_key) |>
+    summarise(val = sum(as.numeric(.data[[var]]), na.rm = TRUE), .groups = "drop")
+}
+```
+
+# Introduction
+
+This project looks at how Indian households manage their money and how many of them are basically living paycheck to paycheck versus having real savings to fall back on. The data comes from the **All India Debt and Investment Survey (AIDIS), Round 77**, run by India's National Statistical Office in 2019. Economists call the paycheck-to-paycheck group "hand-to-mouth" households, and they matter a lot because they're the ones who actually spend extra income right away, which is a big deal for how policy (like tax cuts or rate changes) flows through the economy. I try two ways of sorting households into these groups i) a simple one based on liquid wealth, and ii) the Kaplan–Violante method that also factors in illiquid assets like land. I then map what the picture looks like across Indian states.
+
+# Data processing
+
+Here I'm pulling in the basic household info from Blocks 1 & 2 (state code and survey multiplier weights), plus financial assets from Block 11a (bank deposits, bonds, provident funds) and shares from Block 11b (company shares, mutual funds). Together these make up a household's liquid wealth: assets they could convert to cash quickly if needed.
+
+## Core household identifiers
+
+```{r}
+#| label: load-core
+
+id_df <- read_dta(file.path(data_dir, "Visit1  Level - 01 (Blocks 1 and 2).dta")) |>
+  make_key() |>
+  transmute(
+    hh_key,
+    state = as.integer(state),
+    wt    = as.numeric(mlt)
+  )
+```
+
+## Financial and share assets
+
+```{r}
+#| label: load-assets
+
+fin <- safe_sum(file.path(data_dir, "Visit1  Level - 12 (Block 11a).dta"), "b11aq6")
+shr <- safe_sum(file.path(data_dir, "Visit1  Level - 13 (Block 11b).dta"), "b11bq6")
+```
+
+## Merge into master
+
+```{r}
+#| label: master
+
+master <- id_df |>
+  left_join(fin, by = "hh_key") |>
+  left_join(shr, by = "hh_key") |>
+  mutate(across(everything(), ~ replace_na(.x, 0)))
+```
+
+# Liquid-only classification
+
+The INR 12,000 threshold follows the **Kaplan–Violante (2014)** convention, where a household is "hand-to-mouth" if liquid wealth falls below roughly half of one pay period's income. Applied to India's AIDIS 77 (2019) context, this corresponds to about two weeks of median household earnings, giving a cutoff near INR 12,000. Households below this line cannot smooth even a brief income shock, which is the economic intuition behind the HtM label. Alternative specifications could include different levels for rural-urban split, or a more conservative split of INR 8,000.
+
+```{r}
+#| label: classify-liquid
+
+master <- master |>
+  mutate(
+    net_liquid = val.x + val.y,
+    threshold  = 12000,
+    agent_type = case_when(
+      net_liquid <= threshold     ~ "Poor HtM",
+      net_liquid <= 2 * threshold ~ "Wealthy HtM",
+      TRUE                        ~ "Ricardian"
+    )
+  )
+```
+
+## State-level shares
+
+```{r}
+#| label: state-shares-liquid
+
+state_results <- master |>
+  group_by(state, agent_type) |>
+  summarise(w = sum(wt), .groups = "drop") |>
+  group_by(state) |>
+  mutate(share_pct = w / sum(w) * 100) |>
+  ungroup()
+```
+
+```{r}
+#| label: state-lookup
+
+state_lookup <- tibble::tribble(
+  ~state, ~state_name,
+   1, "Jammu & Kashmir",        2, "Himachal Pradesh",
+   3, "Punjab",                 4, "Chandigarh",
+   5, "Uttarakhand",            6, "Haryana",
+   7, "Delhi",                  8, "Rajasthan",
+   9, "Uttar Pradesh",         10, "Bihar",
+  11, "Sikkim",                12, "Arunachal Pradesh",
+  13, "Nagaland",              14, "Manipur",
+  15, "Mizoram",               16, "Tripura",
+  17, "Meghalaya",             18, "Assam",
+  19, "West Bengal",           20, "Jharkhand",
+  21, "Odisha",                22, "Chhattisgarh",
+  23, "Madhya Pradesh",        24, "Gujarat",
+  25, "Daman & Diu",           26, "Dadra & Nagar Haveli",
+  27, "Maharashtra",           28, "Andhra Pradesh (Old)",
+  29, "Karnataka",             30, "Goa",
+  31, "Lakshadweep",           32, "Kerala",
+  33, "Tamil Nadu",            34, "Puducherry",
+  35, "Andaman & Nicobar",     36, "Telangana",
+  37, "Andhra Pradesh"
+)
+
+state_final <- state_results |>
+  left_join(state_lookup, by = "state") |>
+  mutate(
+    state_name = case_when(
+      state_name == "Jammu & Kashmir"    ~ "Jammu and Kashmir",
+      state_name == "Andaman & Nicobar"  ~ "Andaman and Nicobar",
+      state_name %in% c("Dadra & Nagar Haveli", "Daman & Diu") ~
+        "Dadra and Nagar Haveli and Daman and Diu",
+      state_name == "Andhra Pradesh (Old)" ~ "Andhra Pradesh",
+      TRUE ~ state_name
+    )
+  ) |>
+  group_by(state_name, agent_type) |>
+  summarise(share_pct = mean(share_pct), .groups = "drop")
+```
+
+## Map setup and plot functions
+
+```{r}
+#| label: map-setup
+
+UTs <- c(
+  "Andaman and Nicobar",
+  "Chandigarh",
+  "Dadra and Nagar Haveli and Daman and Diu",
+  "Lakshadweep",
+  "Puducherry",
+  "Delhi"
+)
+
+india_map <- ne_states(country = "India", returnclass = "sf") |>
+  select(name, geometry) |>
+  rmapshaper::ms_simplify(keep = 0.05)
+```
+
+```{r}
+#| label: plot-function
+
+plot_map <- function(d, title) {
+  ggplot() +
+    # UTs shaded dark grey
+    geom_sf(
+      data  = d |> filter(name %in% UTs),
+      fill  = "grey20",
+      color = "white",
+      size  = 0.2
+    ) +
+    # States coloured by share
+    geom_sf(
+      data = d |> filter(!name %in% UTs),
+      aes(fill = share_pct),
+      color = "white",
+      size  = 0.2
+    ) +
+    scale_fill_gradient(
+      low      = "#deebf7",
+      high     = "#08519c",
+      limits   = c(0, 100),
+      na.value = "grey90"
+    ) +
+    labs(title = title, fill = "% households") +
+    theme_minimal() +
+    theme(
+      plot.title      = element_text(face = "bold"),
+      legend.position = "bottom"
+    )
+}
+```
+
+## Share of states of Poor hand to mouth (HtM), Wealth HtM and Ricardian households by state
+
+```{r}
+#| label: fig-liquid-3panel
+#| fig-cap: "Liquid-only classification: shares of Poor HtM, Wealthy HtM, and Ricardian households by state."
+#| fig-width: 16
+#| fig-height: 6
+
+map_data <- india_map |>
+  left_join(state_final, by = c("name" = "state_name"))
+
+mp <- map_data |> filter(agent_type == "Poor HtM")
+mw <- map_data |> filter(agent_type == "Wealthy HtM")
+mr <- map_data |> filter(agent_type == "Ricardian")
+
+p1 <- plot_map(mp, "Poor HtM")
+p2 <- plot_map(mw, "Wealthy HtM")
+p3 <- plot_map(mr, "Ricardian")
+
+final_plot <- (p1 | p2 | p3) +
+  plot_annotation(
+    title = "Household Types Across Indian States (AIDIS 77)",
+    theme = theme(plot.title = element_text(face = "bold", size = 16))
+  )
+
+final_plot
+
+ggsave("kv_final_3panel_map.png", final_plot,
+       width = 16, height = 6, dpi = 300)
+```
+
+Here we see that **Ricardian households dominate almost every state**, with shares visibly above 60% across most of the country. The **Poor HtM** and **Wealthy HtM** panels, by contrast, are washed out in very light blue, suggesting that under the liquid-only classification, fewer than a third of households look "hand-to-mouth" anywhere in India.
+
+Regionally, the northern belt (Punjab, Haryana, Himachal Pradesh, Uttarakhand) and the southern states (Kerala, Tamil Nadu, Karnataka) show the deepest Ricardian shares which are consistent with stronger banking penetration, higher financial inclusion post-Jan Dhan Yojana, and larger household savings. Central and eastern India (Bihar, Jharkhand, Odisha, Chhattisgarh, Madhya Pradesh) show marginally higher Poor HtM shares, in line with their lower per-capita income and shallower formal financial access. Economically, this result is suspicious: India is am emerging economy where HtM shares in the literature typically run 30–50%.
+
+# Kaplan–Violante (KV) classification
+
+The KV approach adds an **illiquid wealth** dimension (land) on top of liquid wealth, producing four household types It refines the hand-to-mouth classification by recognising that many households hold substantial **illiquid wealth** (assets that are valuable but costly or slow to convert into cash). These households look poor on a bank statement but aren't truly wealth-constrained, so they behave differently from the genuinely poor. In the Indian context, land is the dominant illiquid asset. This chunk pulls three land-value variables from Block 9 of AIDIS using `b9q2`, `b9q3`, and `b9q4`, covering different categories of land owned and then sums them per household, and produces `ill_land`, the total illiquid wealth used in the KV classification (still kept at INR 12,000).
+
+## Build illiquid (land) wealth
+
+```{r}
+#| label: kv-land
+
+land  <- safe_sum(file.path(data_dir, "Visit1  Level - 10 (Block 9).dta"), "b9q2") |>
+  rename(land1 = val)
+land2 <- safe_sum(file.path(data_dir, "Visit1  Level - 10 (Block 9).dta"), "b9q3") |>
+  rename(land2 = val)
+land3 <- safe_sum(file.path(data_dir, "Visit1  Level - 10 (Block 9).dta"), "b9q4") |>
+  rename(land3 = val)
+
+ill_land <- land |>
+  full_join(land2, by = "hh_key") |>
+  full_join(land3, by = "hh_key") |>
+  mutate(
+    land1    = replace_na(land1, 0),
+    land2    = replace_na(land2, 0),
+    land3    = replace_na(land3, 0),
+    ill_land = land1 + land2 + land3
+  ) |>
+  select(hh_key, ill_land)
+```
+
+## Build `master2` with liquid + illiquid
+
+```{r}
+#| label: kv-master2
+
+master2 <- id_df |>
+  left_join(fin, by = "hh_key") |>
+  left_join(shr, by = "hh_key") |>
+  mutate(
+    fin_val    = replace_na(val.x, 0),
+    shr_val    = replace_na(val.y, 0),
+    net_liquid = fin_val + shr_val
+  ) |>
+  left_join(ill_land, by = "hh_key") |>
+  mutate(
+    ill_land     = replace_na(ill_land, 0),
+    illiquid     = ill_land,
+    total_wealth = net_liquid + illiquid
+  )
+```
+
+## KV classification and state shares
+
+```{r}
+#| label: kv-classify
+
+master2 <- master2 |>
+  mutate(
+    threshold = 12000,
+    kv_type = case_when(
+      net_liquid <= threshold & illiquid == 0 ~ "Poor HtM",
+      net_liquid <= threshold & illiquid  > 0 ~ "Illiquid-rich HtM",
+      net_liquid  > threshold & illiquid == 0 ~ "Liquid-rich only",
+      net_liquid  > threshold & illiquid  > 0 ~ "Ricardian (dual asset)"
+    )
+  )
+```
+
+```{r}
+#| label: kv-state-shares
+
+state_results_kv <- master2 |>
+  group_by(state, kv_type) |>
+  summarise(w = sum(wt), .groups = "drop") |>
+  group_by(state) |>
+  mutate(share_pct = w / sum(w) * 100) |>
+  ungroup()
+
+state_final_kv <- state_results_kv |>
+  left_join(state_lookup, by = "state") |>
+  mutate(
+    state_name = case_when(
+      state_name == "Jammu & Kashmir"    ~ "Jammu and Kashmir",
+      state_name == "Andaman & Nicobar"  ~ "Andaman and Nicobar",
+      state_name %in% c("Dadra & Nagar Haveli", "Daman & Diu") ~
+        "Dadra and Nagar Haveli and Daman and Diu",
+      state_name == "Andhra Pradesh (Old)" ~ "Andhra Pradesh",
+      TRUE ~ state_name
+    )
+  ) |>
+  group_by(state_name, kv_type) |>
+  summarise(share_pct = mean(share_pct), .groups = "drop")
+```
+
+## 4-panel KV map
+
+```{r}
+#| label: fig-kv-4panel
+#| fig-cap: "Kaplan–Violante classification: shares of Poor HtM, Illiquid-rich HtM, Liquid-rich only, and Ricardian households by state."
+#| fig-width: 20
+#| fig-height: 6
+
+map_data_kv <- india_map |>
+  left_join(state_final_kv, by = c("name" = "state_name"))
+
+mp_kv <- map_data_kv |> filter(kv_type == "Poor HtM")
+mw_kv <- map_data_kv |> filter(kv_type == "Illiquid-rich HtM")
+ml_kv <- map_data_kv |> filter(kv_type == "Liquid-rich only")
+mr_kv <- map_data_kv |> filter(kv_type == "Ricardian (dual asset)")
+
+p1 <- plot_map(mp_kv, "KV: Poor HtM")
+p2 <- plot_map(mw_kv, "KV: Illiquid-rich HtM")
+p3 <- plot_map(ml_kv, "KV: Liquid-rich only")
+p4 <- plot_map(mr_kv, "KV: Ricardian")
+
+final_plot_kv <- (p1 | p2 | p3 | p4) +
+  plot_annotation(
+    title = "Kaplan–Violante (KV) Household Types Across Indian States",
+    theme = theme(plot.title = element_text(face = "bold", size = 16))
+  )
+
+final_plot_kv
+
+ggsave("kv_final_4panel_map.png", final_plot_kv,
+       width = 20, height = 6, dpi = 300)
+```
+
+The KV map tells a pretty different story from the liquid-only one. Once you factor in land, the Ricardian and Liquid-rich-only groups shrink, and suddenly a lot more households show up as either Poor HtM or Illiquid-rich HtM. The southern and western states like Kerala, Tamil Nadu, Karnataka, Maharashtra, Gujarat still look relatively well-off, which makes sense given they have deeper banking systems and more formal saving. But across the northern states (UP, Bihar, MP, Rajasthan) and the north-east, you see a lot of Illiquid-rich HtM households: people who own land but basically have no cash on hand.
+
+This actually matters a lot for New Keynesian HANK-style thinking (Kaplan, Moll and Violante, 2018). In the textbook NK setup, monetary policy works by nudging the representative household to spend more or less today versus tomorrow. But if a big chunk of your population is HtM, interest rates don't really do much for them then what drives their spending is just how much cash lands in their hand this month. The Illiquid-rich HtM group is the interesting one: on paper they look wealthy, but their MPC is high because all that wealth is stuck in land. For India, this suggests rate cuts probably don't transmit all that well, while things like direct cash transfers or income support should punch well above their weight.
+
+# Transition matrix: liquid → KV
+
+How do households re-classify when we move from the liquid-only method to the KV method?
+
+```{r}
+#| label: transition
+
+transition <- master |>
+  select(hh_key, state, agent_type) |>
+  left_join(master2 |> select(hh_key, kv_type), by = "hh_key") |>
+  group_by(agent_type, kv_type) |>
+  summarise(n = n(), .groups = "drop") |>
+  group_by(agent_type) |>
+  mutate(share = n / sum(n) * 100) |>
+  ungroup()
+
+transition
+```
+
+# State-by-state comparison table
+
+Side-by-side shares under both classifications.
+
+```{r}
+#| label: comparison-table
+
+# Liquid-only shares
+liquid_state <- master |>
+  group_by(state, agent_type) |>
+  summarise(w = sum(wt), .groups = "drop") |>
+  group_by(state) |>
+  mutate(share_liquid = w / sum(w) * 100) |>
+  ungroup() |>
+  select(state, agent_type, share_liquid)
+
+# KV shares
+kv_state <- master2 |>
+  group_by(state, kv_type) |>
+  summarise(w = sum(wt), .groups = "drop") |>
+  group_by(state) |>
+  mutate(share_kv = w / sum(w) * 100) |>
+  ungroup() |>
+  select(state, kv_type, share_kv)
+
+# Reshape wide
+liquid_wide <- liquid_state |>
+  pivot_wider(names_from = agent_type, values_from = share_liquid, values_fill = 0)
+
+kv_wide <- kv_state |>
+  pivot_wider(names_from = kv_type, values_from = share_kv, values_fill = 0)
+
+# Merge and attach state names
+comparison_table <- liquid_wide |>
+  left_join(kv_wide, by = "state") |>
+  left_join(state_lookup, by = "state") |>
+  select(state_name, everything(), -state)
+
+comparison_table
+```
+
+The transition matrix is where the two methods really show their differences. Look at the Ricardian row under the liquid-only method: about 47,000 of those households actually turn out to be Liquid-rich only under KV meaning they've got cash, sure, but no land. Only around 38,000 stay "true" Ricardian with both liquid ***and*** illiquid wealth. Even more telling, about 8,500 Poor HtM households flip to Illiquid-rich HtM once land is counted; they looked totally broke on a bank balance, but they actually own land. That's the whole point of KV: the simple method was hiding a lot of wealth.
+
+# Session info
+
+```{r}
+#| label: session
+#| code-fold: true
+
+sessionInfo()
+```
