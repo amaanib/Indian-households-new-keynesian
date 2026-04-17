@@ -1,4 +1,4 @@
-ACCESS Analysis here (select hide code in the top right for easy reading): https://amaanib.github.io/Indian-households-new-keynesian/aidis77_kv_analysis.html 
+ACCESS Analysis here (select 'Hide code' in the top right for easy reading): https://amaanib.github.io/Indian-households-new-keynesian/aidis77_kv_analysis.html 
 
 # Hand-to-Mouth Households in India (AIDIS Round 77)
 
